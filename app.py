@@ -59,6 +59,25 @@ def get_db_connection():
         raise
 
 # Existing upload route (preserved)
+
+@app.route('/get-sheet-data', methods=['GET'])
+def get_sheet_data():
+    try:
+        spreadsheet_id = request.args.get('spreadsheet_id')
+        range_name = request.args.get('range', 'Sheet1!A1:J')
+        if not spreadsheet_id:
+            logger.warning("Missing spreadsheet_id in /get-sheet-data")
+            return jsonify({'error': 'Missing spreadsheet_id'}), 400
+        result = sheets_service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=range_name
+        ).execute()
+        logger.info(f"Fetched sheet data for ID: {spreadsheet_id}")
+        return jsonify({'values': result.get('values', [])}), 200
+    except Exception as e:
+        logger.error(f"Get sheet data error: {e}")
+        return jsonify({'error': str(e)}), 500
+      
 @app.route('/upload', methods=['POST', 'OPTIONS'])
 def upload_files():
     if request.method == 'OPTIONS':
