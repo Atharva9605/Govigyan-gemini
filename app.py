@@ -35,25 +35,26 @@ DB_PARAMS = {
 
 # Google Sheets API setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-# CREDS_FILE = os.getenv('GOOGLE_CREDS', 'credentials.json') # Original line
 
 try:
-    # Attempt to load Google credentials from environment variable as JSON first
-    google_creds_json = os.getenv('GOOGLE_CREDS_JSON') # Use a distinct env var for direct JSON content
-    if google_creds_json:
+    # Get the value of GOOGLE_CREDS from environment variables
+    google_creds_value = os.getenv('GOOGLE_CREDS')
+
+    if google_creds_value:
         try:
-            creds_info = json.loads(google_creds_json)
+            # Attempt to parse GOOGLE_CREDS value as JSON
+            creds_info = json.loads(google_creds_value)
             creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
-            logger.info("Google Sheets API initialized successfully using JSON from environment variable.")
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to decode GOOGLE_CREDS_JSON: {e}. Falling back to file.")
-            # Fallback to file if JSON decoding fails
-            creds = Credentials.from_service_account_file(os.getenv('GOOGLE_CREDS', 'credentials.json'), scopes=SCOPES)
-            logger.info("Google Sheets API initialized successfully using credentials file.")
+            logger.info("Google Sheets API initialized successfully using JSON from GOOGLE_CREDS environment variable.")
+        except json.JSONDecodeError:
+            # If parsing as JSON fails, treat it as a file path
+            logger.warning("GOOGLE_CREDS environment variable is not valid JSON. Attempting to load as file path.")
+            creds = Credentials.from_service_account_file(google_creds_value, scopes=SCOPES)
+            logger.info("Google Sheets API initialized successfully using GOOGLE_CREDS as a file path.")
     else:
-        # If GOOGLE_CREDS_JSON is not set, try loading from a file path specified by GOOGLE_CREDS
-        creds = Credentials.from_service_account_file(os.getenv('GOOGLE_CREDS', 'credentials.json'), scopes=SCOPES)
-        logger.info("Google Sheets API initialized successfully using credentials file.")
+        # If GOOGLE_CREDS is not set, default to 'credentials.json' file
+        creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
+        logger.info("Google Sheets API initialized successfully using 'credentials.json' file.")
 
     sheets_service = build('sheets', 'v4', credentials=creds)
 
