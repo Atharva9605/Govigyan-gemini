@@ -10,6 +10,7 @@ import json
 import logging
 import google.generativeai as genai
 from dotenv import load_dotenv
+import sys # Import sys module
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -20,10 +21,25 @@ CORS(app, resources={r"/*": {"origins": ["http://localhost:3000", "https://your-
                              "methods": ["GET", "POST", "OPTIONS"],
                              "allow_headers": ["Content-Type"]}})
 
-# Configure logging to write to 'app.log' file
-# Setting level to DEBUG to capture more detailed logs
-logging.basicConfig(level=logging.DEBUG, filename='app.log', format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging
+# Create a logger instance
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG) # Set the logging level to DEBUG to capture all messages
+
+# Create file handler which logs even debug messages
+file_handler = logging.FileHandler('app.log')
+file_handler.setLevel(logging.DEBUG) # Ensure file handler captures DEBUG level messages
+file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(file_formatter)
+logger.addHandler(file_handler)
+
+# Create console handler with a higher log level (e.g., INFO)
+# This will output logs to stdout/stderr, which is visible in Render logs
+console_handler = logging.StreamHandler(sys.stdout) # You can use sys.stderr if preferred
+console_handler.setLevel(logging.INFO) # Set a level for console output (e.g., INFO, DEBUG)
+console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(console_formatter)
+logger.addHandler(console_handler)
 
 # Database connection parameters from environment variables
 DB_PARAMS = {
