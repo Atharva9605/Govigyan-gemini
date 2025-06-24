@@ -35,15 +35,30 @@ DB_PARAMS = {
 
 # Google Sheets API setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-CREDS_FILE = os.getenv('GOOGLE_CREDS', 'credentials.json') # Path to your service account credentials file
+# CREDS_FILE = os.getenv('GOOGLE_CREDS', 'credentials.json') # Original line
 
 try:
-    # Initialize Google Sheets service using service account credentials
-    creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
+    # Attempt to load Google credentials from environment variable as JSON first
+    google_creds_json = os.getenv('GOOGLE_CREDS_JSON') # Use a distinct env var for direct JSON content
+    if google_creds_json:
+        try:
+            creds_info = json.loads(google_creds_json)
+            creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+            logger.info("Google Sheets API initialized successfully using JSON from environment variable.")
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to decode GOOGLE_CREDS_JSON: {e}. Falling back to file.")
+            # Fallback to file if JSON decoding fails
+            creds = Credentials.from_service_account_file(os.getenv('GOOGLE_CREDS', 'credentials.json'), scopes=SCOPES)
+            logger.info("Google Sheets API initialized successfully using credentials file.")
+    else:
+        # If GOOGLE_CREDS_JSON is not set, try loading from a file path specified by GOOGLE_CREDS
+        creds = Credentials.from_service_account_file(os.getenv('GOOGLE_CREDS', 'credentials.json'), scopes=SCOPES)
+        logger.info("Google Sheets API initialized successfully using credentials file.")
+
     sheets_service = build('sheets', 'v4', credentials=creds)
-    logger.info("Google Sheets API initialized successfully.")
+
 except Exception as e:
-    logger.error(f"Google Sheets API setup failed: {e}")
+    logger.error(f"Google Sheets API setup failed: {e}", exc_info=True)
     # Re-raise the exception to stop the application if a critical service fails
     raise
 
@@ -54,7 +69,7 @@ try:
     gemini_model = genai.GenerativeModel('gemini-2.0-flash')
     logger.info("Gemini API initialized successfully.")
 except Exception as e:
-    logger.error(f"Gemini API setup failed: {e}")
+    logger.error(f"Gemini API setup failed: {e}", exc_info=True)
     # Re-raise the exception to stop the application if a critical service fails
     raise
 
@@ -65,7 +80,7 @@ def get_db_connection():
         logger.info("Database connection established.")
         return conn
     except Exception as e:
-        logger.error(f"Database connection failed: {e}")
+        logger.error(f"Database connection failed: {e}", exc_info=True)
         raise # Propagate the exception to the caller
 
 # Existing upload route (preserved and modified for StockBook schema)
