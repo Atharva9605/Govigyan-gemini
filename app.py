@@ -8,6 +8,7 @@ import os
 from datetime import datetime
 import json
 import logging
+from urllib.parse import urlparse
 import google.generativeai as genai
 from dotenv import load_dotenv
 
@@ -24,13 +25,26 @@ logging.basicConfig(level=logging.INFO, filename='app.log')
 logger = logging.getLogger(__name__)
 
 # Database connection
-DB_PARAMS = {
-    'dbname': os.getenv('DB_NAME'),
-    'user': os.getenv('DB_USER'),
-    'password': os.getenv('DB_PASSWORD'),
-    'host': os.getenv('DB_HOST'),
-    'port': os.getenv('DB_PORT')
-}
+database_url = os.environ.get('DATABASE_URL')
+if database_url:
+    if database_url.startswith('postgres://'):
+        database_url = 'postgresql://' + database_url[11:]
+    parsed = urlparse(database_url)
+    DB_PARAMS = {
+        'dbname': parsed.path[1:],  # Remove leading '/'
+        'user': parsed.username,
+        'password': parsed.password,
+        'host': parsed.hostname,
+        'port': str(parsed.port) if parsed.port else '5432'
+    }
+else:
+    DB_PARAMS = {
+        'dbname': os.getenv('DB_NAME'),
+        'user': os.getenv('DB_USER'),
+        'password': os.getenv('DB_PASSWORD'),
+        'host': os.getenv('DB_HOST'),
+        'port': os.getenv('DB_PORT')
+    }
 
 # Google Sheets API setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -58,7 +72,33 @@ def get_db_connection():
         logger.error(f"Database connection failed: {e}")
         raise
 
-# Existing upload route (preserved)
+@app.route('/create-table', methods=['POST'])
+def create_table():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS StockBook (
+                Entry_ID SERIAL PRIMARY KEY,
+                DATE DATE,
+                PARTICULARS VARCHAR(255),
+                Voucher_BillNo VARCHAR(255),
+                RECEIPTS_Quantity INTEGER,
+                RECEIPTS_Amount FLOAT,
+                ISSUED_Quantity INTEGER,
+                ISSUED_Amount FLOAT,
+                BALANCE_Quantity INTEGER,
+                BALANCE_Amount FLOAT
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("Table 'StockBook' created or already exists")
+        return jsonify({'message': 'Table created or already exists'}), 200
+    except Exception as e:
+        logger.error(f"Create table error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/get-sheet-data', methods=['GET'])
 def get_sheet_data():
@@ -77,7 +117,7 @@ def get_sheet_data():
     except Exception as e:
         logger.error(f"Get sheet data error: {e}")
         return jsonify({'error': str(e)}), 500
-      
+
 @app.route('/upload', methods=['POST', 'OPTIONS'])
 def upload_files():
     if request.method == 'OPTIONS':
@@ -93,46 +133,68 @@ def upload_files():
 
         data_entries = []
         for file in files:
-            gemini_result = {}  # Replace with your original Gemini logic
+            file_content = file.read()
+            logger.debug(f"Processing file: {file.filename}, size: {len(file_content)} bytes")
+            response = gemini_model.generate_content([
+                {"mime_type": file.mimetype, "data": file_content},
+                {"text": "Extract financial data: description, bill number, quantity, amount."}
+            ])
+            gemini_result = response.text
+            logger.debug(f"Gemini result: {gemini_result}")
+            gemini_data = json.loads(gemini_result) if gemini_result.startswith('{') else {
+                'description': gemini_result, 'bill_no': 'N/A', 'quantity': 0, 'amount': 0.0
+            }
             entry = {
                 'DATE': datetime.now().strftime('%Y-%m-%d'),
-                'PARTICULARS': gemini_result.get('description', 'Processed File'),
-                'Voucher_BillNo': gemini_result.get('bill_no', 'N/A'),
-                'RECEIPTS_Quantity': gemini_result.get('quantity', 0),
-                'RECEIPTS_Amount': float(gemini_result.get('amount', 0.0)),
+                'PARTICULARS': gemini_data.get('description', 'Processed File'),
+                'Voucher_BillNo': gemini_data.get('bill_no', 'N/A'),
+                'RECEIPTS_Quantity': int(gemini_data.get('quantity', 0)),
+                'RECEIPTS_Amount': float(gemini_data.get('amount', 0.0)),
                 'ISSUED_Quantity': 0,
                 'ISSUED_Amount': 0.0,
-                'BALANCE_Quantity': gemini_result.get('quantity', 0),
-                'BALANCE_Amount': float(gemini_result.get('amount', 0.0))
+                'BALANCE_Quantity': int(gemini_data.get('quantity', 0)),
+                'BALANCE_Amount': float(gemini_data.get('amount', 0.0))
             }
             data_entries.append(entry)
 
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        for entry in data_entries:
-            cur.execute("""
-                INSERT INTO table_name (DATE, PARTICULARS, Voucher_BillNo, RECEIPTS_Quantity, RECEIPTS_Amount,
-                                        ISSUED_Quantity, ISSUED_Amount, BALANCE_Quantity, BALANCE_Amount)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING Entry_ID;
-            """, (
-                entry['DATE'], entry['PARTICULARS'], entry['Voucher_BillNo'],
-                entry['RECEIPTS_Quantity'], entry['RECEIPTS_Amount'],
-                entry['ISSUED_Quantity'], entry['ISSUED_Amount'],
-                entry['BALANCE_Quantity'], entry['BALANCE_Amount']
-            ))
-            entry['Entry_ID'] = cur.fetchone()['Entry_ID']
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info(f"Uploaded {len(files)} files successfully via /upload")
-        return jsonify({'message': 'Files processed'}), 200
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            logger.info(f"Attempting to insert {len(data_entries)} entries into StockBook")
+            for entry in data_entries:
+                logger.debug(f"Inserting entry: {entry}")
+                cur.execute("""
+                    INSERT INTO StockBook (DATE, PARTICULARS, Voucher_BillNo, RECEIPTS_Quantity, RECEIPTS_Amount,
+                                           ISSUED_Quantity, ISSUED_Amount, BALANCE_Quantity, BALANCE_Amount)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING Entry_ID;
+                """, (
+                    entry['DATE'], entry['PARTICULARS'], entry['Voucher_BillNo'],
+                    entry['RECEIPTS_Quantity'], entry['RECEIPTS_Amount'],
+                    entry['ISSUED_Quantity'], entry['ISSUED_Amount'],
+                    entry['BALANCE_Quantity'], entry['BALANCE_Amount']
+                ))
+                entry['Entry_ID'] = cur.fetchone()['Entry_ID']
+                logger.info(f"Inserted entry with ID: {entry['Entry_ID']}")
+            conn.commit()
+            logger.info(f"Committed {len(data_entries)} entries successfully")
+            cur.close()
+            conn.close()
+            logger.info(f"Uploaded {len(files)} files successfully via /upload")
+            return jsonify({'message': 'Files processed'}), 200
+        except Exception as e:
+            logger.error(f"Upload error: {e}")
+            if conn:
+                conn.rollback()
+                cur.close()
+                conn.close()
+            return jsonify({'error': str(e)}), 500
 
     except Exception as e:
         logger.error(f"Upload error: {e}")
         return jsonify({'error': str(e)}), 500
 
-# Updated upload-flash to create new spreadsheet
 @app.route('/upload-flash', methods=['POST', 'OPTIONS'])
 def upload_files_flash():
     if request.method == 'OPTIONS':
@@ -173,23 +235,37 @@ def upload_files_flash():
             }
             data_entries.append(entry)
 
-        logger.info("Inserting into PostgreSQL")
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        for entry in data_entries:
-            cur.execute("""
-                INSERT INTO table_name (DATE, PARTICULARS, Voucher_BillNo, RECEIPTS_Quantity, RECEIPTS_Amount,
-                                        ISSUED_Quantity, ISSUED_Amount, BALANCE_Quantity, BALANCE_Amount)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING Entry_ID;
-            """, (
-                entry['DATE'], entry['PARTICULARS'], entry['Voucher_BillNo'],
-                entry['RECEIPTS_Quantity'], entry['RECEIPTS_Amount'],
-                entry['ISSUED_Quantity'], entry['ISSUED_Amount'],
-                entry['BALANCE_Quantity'], entry['BALANCE_Amount']
-            ))
-            entry['Entry_ID'] = cur.fetchone()['Entry_ID']
-        conn.commit()
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            logger.info(f"Attempting to insert {len(data_entries)} entries into StockBook")
+            for entry in data_entries:
+                logger.debug(f"Inserting entry: {entry}")
+                cur.execute("""
+                    INSERT INTO StockBook (DATE, PARTICULARS, Voucher_BillNo, RECEIPTS_Quantity, RECEIPTS_Amount,
+                                           ISSUED_Quantity, ISSUED_Amount, BALANCE_Quantity, BALANCE_Amount)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING Entry_ID;
+                """, (
+                    entry['DATE'], entry['PARTICULARS'], entry['Voucher_BillNo'],
+                    entry['RECEIPTS_Quantity'], entry['RECEIPTS_Amount'],
+                    entry['ISSUED_Quantity'], entry['ISSUED_Amount'],
+                    entry['BALANCE_Quantity'], entry['BALANCE_Amount']
+                ))
+                entry['Entry_ID'] = cur.fetchone()['Entry_ID']
+                logger.info(f"Inserted entry with ID: {entry['Entry_ID']}")
+            conn.commit()
+            logger.info(f"Committed {len(data_entries)} entries successfully")
+            cur.close()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Upload error: {e}")
+            if conn:
+                conn.rollback()
+                cur.close()
+                conn.close()
+            return jsonify({'error': str(e)}), 500
 
         logger.info("Creating new Google Spreadsheet")
         spreadsheet = sheets_service.spreadsheets().create(
@@ -209,8 +285,6 @@ def upload_files_flash():
             body={'values': values}
         ).execute()
 
-        cur.close()
-        conn.close()
         sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
         logger.info(f"Created new spreadsheet: {sheet_url}")
         return jsonify({'message': 'Files processed and new spreadsheet created', 'sheet_url': sheet_url}), 200
@@ -224,11 +298,11 @@ def get_results():
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT * FROM table_name ORDER BY Entry_ID")
+        cur.execute("SELECT * FROM StockBook ORDER BY Entry_ID")
         data = cur.fetchall()
         cur.close()
         conn.close()
-        logger.info("Fetched results successfully")
+        logger.info(f"Fetched {len(data)} results successfully")
         return jsonify(data), 200
     except Exception as e:
         logger.error(f"Results error: {e}")
@@ -240,9 +314,10 @@ def update_data():
         updates = request.json
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
+        logger.info(f"Attempting to update {len(updates)} entries")
         for update in updates:
             cur.execute("""
-                UPDATE table_name
+                UPDATE StockBook
                 SET DATE = %s, PARTICULARS = %s, Voucher_BillNo = %s,
                     RECEIPTS_Quantity = %s, RECEIPTS_Amount = %s,
                     ISSUED_Quantity = %s, ISSUED_Amount = %s,
@@ -291,6 +366,43 @@ def export_to_sheet():
         return jsonify({'message': 'Sheet created', 'link': shareable_link}), 200
     except Exception as e:
         logger.error(f"Export error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/test-insert', methods=['POST'])
+def test_insert():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        entry = {
+            'DATE': datetime.now().strftime('%Y-%m-%d'),
+            'PARTICULARS': 'Test Entry',
+            'Voucher_BillNo': 'TEST123',
+            'RECEIPTS_Quantity': 10,
+            'RECEIPTS_Amount': 100.0,
+            'ISSUED_Quantity': 0,
+            'ISSUED_Amount': 0.0,
+            'BALANCE_Quantity': 10,
+            'BALANCE_Amount': 100.0
+        }
+        cur.execute("""
+            INSERT INTO StockBook (DATE, PARTICULARS, Voucher_BillNo, RECEIPTS_Quantity, RECEIPTS_Amount,
+                                   ISSUED_Quantity, ISSUED_Amount, BALANCE_Quantity, BALANCE_Amount)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING Entry_ID;
+        """, (
+            entry['DATE'], entry['PARTICULARS'], entry['Voucher_BillNo'],
+            entry['RECEIPTS_Quantity'], entry['RECEIPTS_Amount'],
+            entry['ISSUED_Quantity'], entry['ISSUED_Amount'],
+            entry['BALANCE_Quantity'], entry['BALANCE_Amount']
+        ))
+        entry_id = cur.fetchone()['Entry_ID']
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info(f"Test insert successful with ID: {entry_id}")
+        return jsonify({'message': 'Test insert successful', 'entry_id': entry_id}), 200
+    except Exception as e:
+        logger.error(f"Test insert error: {e}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
