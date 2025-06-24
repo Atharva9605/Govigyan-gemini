@@ -10,106 +10,77 @@ import json
 import logging
 import google.generativeai as genai
 from dotenv import load_dotenv
-import sys # Import sys module
 
-# Load environment variables from a .env file
+# Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
-# Configure CORS to allow requests from your frontend
-CORS(app, resources={r"/*": {"origins": ["http://localhost:3000", "https://your-deployed-frontend.com"],
-                             "methods": ["GET", "POST", "OPTIONS"],
-                             "allow_headers": ["Content-Type"]}})
+CORS(app, resources={r"/*": {"origins": ["http://localhost:3000", "https://your-deployed-frontend.com"], 
+                            "methods": ["GET", "POST", "OPTIONS"], 
+                            "allow_headers": ["Content-Type"]}})
 
 # Configure logging
-# Create a logger instance
+logging.basicConfig(level=logging.INFO, filename='app.log')
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG) # Set the logging level to DEBUG to capture all messages
 
-# Create file handler which logs even debug messages
-file_handler = logging.FileHandler('app.log')
-file_handler.setLevel(logging.DEBUG) # Ensure file handler captures DEBUG level messages
-file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(file_formatter)
-logger.addHandler(file_handler)
-
-# Create console handler with a higher log level (e.g., INFO)
-# This will output logs to stdout/stderr, which is visible in Render logs
-console_handler = logging.StreamHandler(sys.stdout) # You can use sys.stderr if preferred
-console_handler.setLevel(logging.INFO) # Set a level for console output (e.g., INFO, DEBUG)
-console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-console_handler.setFormatter(console_formatter)
-logger.addHandler(console_handler)
-
-# Database connection parameters from environment variables
+# Database connection
 DB_PARAMS = {
-    'dbname': os.getenv('DB_NAME', 'your_db'),
-    'user': os.getenv('DB_USER', 'your_user'),
-    'password': os.getenv('DB_PASSWORD', 'your_password'),
-    'host': os.getenv('DB_HOST', 'your_host'),
-    'port': os.getenv('DB_PORT', '5432')
+    'dbname': os.getenv('DB_NAME'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
+    'host': os.getenv('DB_HOST'),
+    'port': os.getenv('DB_PORT')
 }
 
 # Google Sheets API setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-
+creds_json = os.getenv('GOOGLE_CREDS')
 try:
-    # Get the value of GOOGLE_CREDS from environment variables
-    google_creds_value = os.getenv('GOOGLE_CREDS')
-
-    if google_creds_value:
-        try:
-            # Attempt to parse GOOGLE_CREDS value as JSON
-            creds_info = json.loads(google_creds_value)
-            creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
-            logger.info("Google Sheets API initialized successfully using JSON from GOOGLE_CREDS environment variable.")
-        except json.JSONDecodeError:
-            # If parsing as JSON fails, treat it as a file path
-            logger.warning("GOOGLE_CREDS environment variable is not valid JSON. Attempting to load as file path.")
-            creds = Credentials.from_service_account_file(google_creds_value, scopes=SCOPES)
-            logger.info("Google Sheets API initialized successfully using GOOGLE_CREDS as a file path.")
-    else:
-        # If GOOGLE_CREDS is not set, default to 'credentials.json' file
-        creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
-        logger.info("Google Sheets API initialized successfully using 'credentials.json' file.")
-
+    creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=SCOPES)
     sheets_service = build('sheets', 'v4', credentials=creds)
-
 except Exception as e:
-    logger.error(f"Google Sheets API setup failed: {e}", exc_info=True)
-    # Re-raise the exception to stop the application if a critical service fails
+    logger.error(f"Google Sheets API setup failed: {e}")
     raise
 
 # Gemini 2.0 Flash setup
 try:
-    # Configure Gemini API with the API key from environment variables
     genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
     gemini_model = genai.GenerativeModel('gemini-2.0-flash')
-    logger.info("Gemini API initialized successfully.")
 except Exception as e:
-    logger.error(f"Gemini API setup failed: {e}", exc_info=True)
-    # Re-raise the exception to stop the application if a critical service fails
+    logger.error(f"Gemini API setup failed: {e}")
     raise
 
 def get_db_connection():
-    """Establishes and returns a new PostgreSQL database connection."""
     try:
         conn = psycopg2.connect(**DB_PARAMS)
-        logger.info("Database connection established.")
         return conn
     except Exception as e:
-        logger.error(f"Database connection failed: {e}", exc_info=True)
-        raise # Propagate the exception to the caller
+        logger.error(f"Database connection failed: {e}")
+        raise
 
-# Existing upload route (preserved and modified for StockBook schema)
+# Existing upload route (preserved)
+
+@app.route('/get-sheet-data', methods=['GET'])
+def get_sheet_data():
+    try:
+        spreadsheet_id = request.args.get('spreadsheet_id')
+        range_name = request.args.get('range', 'Sheet1!A1:J')
+        if not spreadsheet_id:
+            logger.warning("Missing spreadsheet_id in /get-sheet-data")
+            return jsonify({'error': 'Missing spreadsheet_id'}), 400
+        result = sheets_service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=range_name
+        ).execute()
+        logger.info(f"Fetched sheet data for ID: {spreadsheet_id}")
+        return jsonify({'values': result.get('values', [])}), 200
+    except Exception as e:
+        logger.error(f"Get sheet data error: {e}")
+        return jsonify({'error': str(e)}), 500
+      
 @app.route('/upload', methods=['POST', 'OPTIONS'])
 def upload_files():
-    """
-    Handles file uploads, processes them (placeholder for Gemini logic),
-    inserts data into the StockBook table, and syncs to Google Sheets.
-    """
     if request.method == 'OPTIONS':
-        # Handle CORS preflight request
         return '', 200
     try:
         if 'files' not in request.files:
@@ -121,348 +92,207 @@ def upload_files():
             return jsonify({'error': 'No valid files uploaded'}), 400
 
         data_entries = []
-        for file_item in files: # Renamed 'file' to 'file_item' to avoid conflict with `file` (builtin)
-            # Placeholder for Gemini logic. In a real scenario, this would extract data from the file.
+        for file in files:
             gemini_result = {}  # Replace with your original Gemini logic
             entry = {
-                'Date': datetime.now().strftime('%Y-%m-%d'),
-                'Particulars': gemini_result.get('description', 'Processed File'),
-                'VoucherBillNo': gemini_result.get('bill_no', 'N/A'),
-                'ReceiptQuantity': gemini_result.get('quantity', 0),
-                'ReceiptAmount': float(gemini_result.get('amount', 0.0)),
-                'IssuedQuantity': 0,
-                'IssuedAmount': 0.0,
-                'BalanceQuantity': gemini_result.get('quantity', 0),
-                'BalanceAmount': float(gemini_result.get('amount', 0.0))
+                'DATE': datetime.now().strftime('%Y-%m-%d'),
+                'PARTICULARS': gemini_result.get('description', 'Processed File'),
+                'Voucher_BillNo': gemini_result.get('bill_no', 'N/A'),
+                'RECEIPTS_Quantity': gemini_result.get('quantity', 0),
+                'RECEIPTS_Amount': float(gemini_result.get('amount', 0.0)),
+                'ISSUED_Quantity': 0,
+                'ISSUED_Amount': 0.0,
+                'BALANCE_Quantity': gemini_result.get('quantity', 0),
+                'BALANCE_Amount': float(gemini_result.get('amount', 0.0))
             }
             data_entries.append(entry)
 
-        logger.debug(f"Data entries prepared for DB insertion in /upload: {json.dumps(data_entries, indent=2)}")
-
         conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor) # Use RealDictCursor for dictionary-like rows
-
-        # Insert data into StockBook table
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         for entry in data_entries:
-            sql_query = """
-                INSERT INTO StockBook (Date, Particulars, VoucherBillNo, ReceiptQuantity, ReceiptAmount,
-                                     IssuedQuantity, IssuedAmount, BalanceQuantity, BalanceAmount)
+            cur.execute("""
+                INSERT INTO table_name (DATE, PARTICULARS, Voucher_BillNo, RECEIPTS_Quantity, RECEIPTS_Amount,
+                                        ISSUED_Quantity, ISSUED_Amount, BALANCE_Quantity, BALANCE_Amount)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING TransactionID; -- Return the auto-generated TransactionID
-            """
-            params = (
-                entry['Date'], entry['Particulars'], entry['VoucherBillNo'],
-                entry['ReceiptQuantity'], entry['ReceiptAmount'],
-                entry['IssuedQuantity'], entry['IssuedAmount'],
-                entry['BalanceQuantity'], entry['BalanceAmount']
-            )
-            logger.debug(f"Executing SQL in /upload: {sql_query} with params: {params}")
-            
-            try:
-                cur.execute(sql_query, params)
-                # Fetch the returned TransactionID and add it to the entry dictionary
-                returned_id = cur.fetchone()
-                if returned_id:
-                    entry['TransactionID'] = returned_id['transactionid'] # Column names returned by psycopg2 are lowercase
-                    logger.debug(f"Successfully inserted row, TransactionID: {entry['TransactionID']}")
-                else:
-                    logger.warning("No TransactionID returned after INSERT. Row might not have been inserted.")
-            except psycopg2.Error as db_error:
-                logger.error(f"Database error during insert in /upload: {db_error}", exc_info=True)
-                raise # Re-raise to trigger rollback and general error handling
-            
-        conn.commit() # Commit the transaction to save changes to the database
-        logger.info("Database commit successful in /upload.")
-
-        # Sync data to Google Sheets
-        spreadsheet_id = os.getenv('SPREADSHEET_ID', 'your_spreadsheet_id')
-        values = [[e['TransactionID'], e['Date'], e['Particulars'], e['VoucherBillNo'],
-                   e['ReceiptQuantity'], e['ReceiptAmount'], e['IssuedQuantity'],
-                   e['IssuedAmount'], e['BalanceQuantity'], e['BalanceAmount']]
-                  for e in data_entries]
-        sheets_service.spreadsheets().values().append(
-            spreadsheetId=spreadsheet_id,
-            range='A1', # Append to the first sheet, starting at A1
-            valueInputOption='RAW', # Interpret input data as raw values
-            body={'values': values}
-        ).execute()
-        logger.info("Data synced to Google Sheets in /upload.")
-
+                RETURNING Entry_ID;
+            """, (
+                entry['DATE'], entry['PARTICULARS'], entry['Voucher_BillNo'],
+                entry['RECEIPTS_Quantity'], entry['RECEIPTS_Amount'],
+                entry['ISSUED_Quantity'], entry['ISSUED_Amount'],
+                entry['BALANCE_Quantity'], entry['BALANCE_Amount']
+            ))
+            entry['Entry_ID'] = cur.fetchone()['Entry_ID']
+        conn.commit()
         cur.close()
         conn.close()
-        logger.info(f"Uploaded {len(files)} files successfully via /upload and synced to Google Sheets.")
-        return jsonify({'message': 'Files processed and synced'}), 200
+        logger.info(f"Uploaded {len(files)} files successfully via /upload")
+        return jsonify({'message': 'Files processed'}), 200
 
     except Exception as e:
-        logger.error(f"Upload error: {e}", exc_info=True) # Log full traceback
-        # Rollback in case of error
-        if 'conn' in locals() and conn:
-            conn.rollback()
-            logger.warning("Database transaction rolled back in /upload due to error.")
+        logger.error(f"Upload error: {e}")
         return jsonify({'error': str(e)}), 500
 
-# Updated upload-flash route with detailed error logging and StockBook schema alignment
+# Updated upload-flash to create new spreadsheet
 @app.route('/upload-flash', methods=['POST', 'OPTIONS'])
 def upload_files_flash():
-    """
-    Handles file uploads, processes them with Gemini 2.0 Flash,
-    inserts data into the StockBook table, and syncs to Google Sheets.
-    """
     if request.method == 'OPTIONS':
-        # Handle CORS preflight request
         return '', 200
     try:
         if 'files' not in request.files:
-            logger.warning("No files in request in /upload-flash")
+            logger.warning("No files in request")
             return jsonify({'error': 'No files uploaded'}), 400
         files = request.files.getlist('files')
         if not files or all(f.filename == '' for f in files):
-            logger.warning("Empty file list or no valid files in /upload-flash")
+            logger.warning("Empty file list or no valid files")
             return jsonify({'error': 'No valid files uploaded'}), 400
 
-        logger.info(f"Processing {len(files)} files with Gemini 2.0 Flash in /upload-flash")
+        logger.info(f"Processing {len(files)} files with Gemini 2.0 Flash")
         data_entries = []
-        for file_item in files:
-            try:
-                # Read file content and prepare for Gemini API
-                file_content = file_item.read()
-                logger.debug(f"Processing file: {file_item.filename}, size: {len(file_content)} bytes, mimetype: {file_item.mimetype}")
+        for file in files:
+            file_content = file.read()
+            logger.debug(f"Processing file: {file.filename}, size: {len(file_content)} bytes")
+            response = gemini_model.generate_content([
+                {"mime_type": file.mimetype, "data": file_content},
+                {"text": "Extract financial data: description, bill number, quantity, amount."}
+            ])
+            gemini_result = response.text
+            logger.debug(f"Gemini result: {gemini_result}")
+            gemini_data = json.loads(gemini_result) if gemini_result.startswith('{') else {
+                'description': gemini_result, 'bill_no': 'N/A', 'quantity': 0, 'amount': 0.0
+            }
+            entry = {
+                'DATE': datetime.now().strftime('%Y-%m-%d'),
+                'PARTICULARS': gemini_data.get('description', 'Processed File'),
+                'Voucher_BillNo': gemini_data.get('bill_no', 'N/A'),
+                'RECEIPTS_Quantity': int(gemini_data.get('quantity', 0)),
+                'RECEIPTS_Amount': float(gemini_data.get('amount', 0.0)),
+                'ISSUED_Quantity': 0,
+                'ISSUED_Amount': 0.0,
+                'BALANCE_Quantity': int(gemini_data.get('quantity', 0)),
+                'BALANCE_Amount': float(gemini_data.get('amount', 0.0))
+            }
+            data_entries.append(entry)
 
-                # Call Gemini API to extract data
-                response = gemini_model.generate_content([
-                    {"mime_type": file_item.mimetype, "data": file_content},
-                    {"text": "Extract financial data: description, bill number, quantity, amount. Respond as a JSON object with keys 'description', 'bill_no', 'quantity', 'amount'."}
-                ])
-                gemini_result_text = response.text
-                logger.debug(f"Gemini raw result: {gemini_result_text}")
-
-                # Parse Gemini's JSON response
-                try:
-                    gemini_data = json.loads(gemini_result_text)
-                except json.JSONDecodeError:
-                    logger.error(f"Failed to parse Gemini JSON: {gemini_result_text}. Setting fallback data.", exc_info=True)
-                    # Fallback if Gemini doesn't return perfect JSON
-                    gemini_data = {
-                        'description': gemini_result_text, # Use the raw text as description
-                        'bill_no': 'N/A',
-                        'quantity': 0,
-                        'amount': 0.0
-                    }
-
-                # Map Gemini data to StockBook schema
-                entry = {
-                    'Date': datetime.now().strftime('%Y-%m-%d'),
-                    'Particulars': gemini_data.get('description', 'Processed File'),
-                    'VoucherBillNo': gemini_data.get('bill_no', 'N/A'),
-                    'ReceiptQuantity': float(gemini_data.get('quantity', 0)), # Ensure float for DECIMAL type
-                    'ReceiptAmount': float(gemini_data.get('amount', 0.0)),
-                    'IssuedQuantity': 0.0, # Default to 0.0 for quantities, 0.0 for amounts
-                    'IssuedAmount': 0.0,
-                    'BalanceQuantity': float(gemini_data.get('quantity', 0)),
-                    'BalanceAmount': float(gemini_data.get('amount', 0.0))
-                }
-                data_entries.append(entry)
-            except Exception as e:
-                logger.error(f"Gemini processing failed for {file_item.filename}: {e}", exc_info=True)
-                # Decide whether to raise or continue; here, re-raise to fail the whole request
-                raise
-
-        logger.debug(f"Data entries prepared for DB insertion in /upload-flash: {json.dumps(data_entries, indent=2)}")
-        logger.info("Inserting into PostgreSQL StockBook table.")
+        logger.info("Inserting into PostgreSQL")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
         for entry in data_entries:
-            sql_query = """
-                INSERT INTO StockBook (Date, Particulars, VoucherBillNo, ReceiptQuantity, ReceiptAmount,
-                                     IssuedQuantity, IssuedAmount, BalanceQuantity, BalanceAmount)
+            cur.execute("""
+                INSERT INTO table_name (DATE, PARTICULARS, Voucher_BillNo, RECEIPTS_Quantity, RECEIPTS_Amount,
+                                        ISSUED_Quantity, ISSUED_Amount, BALANCE_Quantity, BALANCE_Amount)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING TransactionID;
-            """
-            params = (
-                entry['Date'], entry['Particulars'], entry['VoucherBillNo'],
-                entry['ReceiptQuantity'], entry['ReceiptAmount'],
-                entry['IssuedQuantity'], entry['IssuedAmount'],
-                entry['BalanceQuantity'], entry['BalanceAmount']
-            )
-            logger.debug(f"Executing SQL in /upload-flash: {sql_query} with params: {params}")
-
-            try:
-                cur.execute(sql_query, params)
-                returned_id = cur.fetchone()
-                if returned_id:
-                    entry['TransactionID'] = returned_id['transactionid'] # psycopg2 returns column names in lowercase
-                    logger.debug(f"Successfully inserted row, TransactionID: {entry['TransactionID']}")
-                else:
-                    logger.warning("No TransactionID returned after INSERT in /upload-flash. Row might not have been inserted.")
-            except psycopg2.Error as db_error:
-                logger.error(f"Database error during insert in /upload-flash: {db_error}", exc_info=True)
-                raise # Re-raise to trigger rollback and general error handling
-            
+                RETURNING Entry_ID;
+            """, (
+                entry['DATE'], entry['PARTICULARS'], entry['Voucher_BillNo'],
+                entry['RECEIPTS_Quantity'], entry['RECEIPTS_Amount'],
+                entry['ISSUED_Quantity'], entry['ISSUED_Amount'],
+                entry['BALANCE_Quantity'], entry['BALANCE_Amount']
+            ))
+            entry['Entry_ID'] = cur.fetchone()['Entry_ID']
         conn.commit()
-        logger.info("Database commit successful in /upload-flash.")
 
-        logger.info("Syncing to Google Sheets.")
-        spreadsheet_id = os.getenv('SPREADSHEET_ID', 'your_spreadsheet_id')
-        values = [[e['TransactionID'], e['Date'], e['Particulars'], e['VoucherBillNo'],
-                   e['ReceiptQuantity'], e['ReceiptAmount'], e['IssuedQuantity'],
-                   e['IssuedAmount'], e['BalanceQuantity'], e['BalanceAmount']]
-                  for e in data_entries]
-
-        # Append data to the Google Sheet
-        sheets_service.spreadsheets().values().append(
+        logger.info("Creating new Google Spreadsheet")
+        spreadsheet = sheets_service.spreadsheets().create(
+            body={'properties': {'title': f'Upload_{datetime.now().strftime("%Y%m%d_%H%M%S")}'} }
+        ).execute()
+        spreadsheet_id = spreadsheet['spreadsheetId']
+        headers = ['Entry_ID', 'DATE', 'PARTICULARS', 'Voucher_BillNo', 'RECEIPTS_Quantity', 
+                   'RECEIPTS_Amount', 'ISSUED_Quantity', 'ISSUED_Amount', 'BALANCE_Quantity', 'BALANCE_Amount']
+        values = [headers] + [[e['Entry_ID'], e['DATE'], e['PARTICULARS'], e['Voucher_BillNo'],
+                               e['RECEIPTS_Quantity'], e['RECEIPTS_Amount'], e['ISSUED_Quantity'],
+                               e['ISSUED_Amount'], e['BALANCE_Quantity'], e['BALANCE_Amount']] 
+                              for e in data_entries]
+        sheets_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
             range='A1',
             valueInputOption='RAW',
             body={'values': values}
         ).execute()
-        logger.info("Data synced to Google Sheets in /upload-flash.")
 
         cur.close()
         conn.close()
-        sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit" # Link for editing the sheet
-        logger.info(f"Upload successful, sheet URL: {sheet_url}")
-        return jsonify({'message': 'Files processed and synced to Google Sheet', 'sheet_url': sheet_url}), 200
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+        logger.info(f"Created new spreadsheet: {sheet_url}")
+        return jsonify({'message': 'Files processed and new spreadsheet created', 'sheet_url': sheet_url}), 200
 
     except Exception as e:
-        logger.error(f"Upload-flash error: {e}", exc_info=True)
-        if 'conn' in locals() and conn:
-            conn.rollback() # Ensure rollback on error
-            logger.warning("Database transaction rolled back in /upload-flash due to error.")
+        logger.error(f"Upload-flash error: {e}")
         return jsonify({'error': f"Failed to process files: {str(e)}"}), 500
 
 @app.route('/results', methods=['GET'])
 def get_results():
-    """Retrieves all data from the StockBook table."""
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        # Select all columns from StockBook, ordered by TransactionID
-        cur.execute("SELECT * FROM StockBook ORDER BY TransactionID")
+        cur.execute("SELECT * FROM table_name ORDER BY Entry_ID")
         data = cur.fetchall()
         cur.close()
         conn.close()
-        logger.info("Fetched results successfully from StockBook table.")
+        logger.info("Fetched results successfully")
         return jsonify(data), 200
     except Exception as e:
-        logger.error(f"Results error: {e}", exc_info=True)
-        return jsonify({'error': 'Failed to load data from StockBook'}), 500
+        logger.error(f"Results error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/update', methods=['POST'])
 def update_data():
-    """Updates existing data in the StockBook table and syncs to Google Sheets."""
     try:
-        updates = request.json # Expects a list of dictionaries, each representing a row to update
-        logger.debug(f"Received updates for DB in /update: {json.dumps(updates, indent=2)}")
-
+        updates = request.json
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
         for update in updates:
-            sql_query = """
-                UPDATE StockBook
-                SET Date = %s, Particulars = %s, VoucherBillNo = %s,
-                    ReceiptQuantity = %s, ReceiptAmount = %s,
-                    IssuedQuantity = %s, IssuedAmount = %s,
-                    BalanceQuantity = %s, BalanceAmount = %s
-                WHERE TransactionID = %s
-            """
-            params = (
-                update['Date'], update['Particulars'], update['VoucherBillNo'],
-                update['ReceiptQuantity'], update['ReceiptAmount'],
-                update['IssuedQuantity'], update['IssuedAmount'],
-                update['BalanceQuantity'], update['BalanceAmount'],
-                update['TransactionID'] # Use TransactionID for WHERE clause
-            )
-            logger.debug(f"Executing SQL in /update: {sql_query} with params: {params}")
-            
-            try:
-                cur.execute(sql_query, params)
-                if cur.rowcount == 0:
-                    logger.warning(f"No row updated for TransactionID: {update['TransactionID']}")
-            except psycopg2.Error as db_error:
-                logger.error(f"Database error during update in /update: {db_error}", exc_info=True)
-                raise # Re-raise to trigger rollback and general error handling
-
+            cur.execute("""
+                UPDATE table_name
+                SET DATE = %s, PARTICULARS = %s, Voucher_BillNo = %s,
+                    RECEIPTS_Quantity = %s, RECEIPTS_Amount = %s,
+                    ISSUED_Quantity = %s, ISSUED_Amount = %s,
+                    BALANCE_Quantity = %s, BALANCE_Amount = %s
+                WHERE Entry_ID = %s
+            """, (
+                update['DATE'], update['PARTICULARS'], update['Voucher_BillNo'],
+                update['RECEIPTS_Quantity'], update['RECEIPTS_Amount'],
+                update['ISSUED_Quantity'], update['ISSUED_Amount'],
+                update['BALANCE_Quantity'], update['BALANCE_Amount'],
+                update['Entry_ID']
+            ))
         conn.commit()
-        logger.info("Database commit successful in /update.")
-
-        # Sync all data back to Google Sheets (clear and rewrite for simplicity in update)
-        spreadsheet_id = os.getenv('SPREADSHEET_ID', 'your_spreadsheet_id')
-        
-        # Fetch all data after update for full sync to sheets
-        cur.execute("SELECT * FROM StockBook ORDER BY TransactionID")
-        all_data_after_update = cur.fetchall()
-        logger.debug(f"All data fetched for Google Sheet sync: {json.dumps(all_data_after_update, indent=2)}")
-
-        # Prepare values for Google Sheets, ensuring headers are included for clarity
-        headers = ['TransactionID', 'Date', 'Particulars', 'VoucherBillNo', 'ReceiptQuantity',
-                   'ReceiptAmount', 'IssuedQuantity', 'IssuedAmount', 'BalanceQuantity', 'BalanceAmount']
-        
-        values_to_write = [headers] + [[d['transactionid'], d['date'].strftime('%Y-%m-%d'), d['particulars'], d['voucherbillno'],
-                                         d['receiptquantity'], d['receiptamount'], d['issuedquantity'],
-                                         d['issuedamount'], d['balancequantity'], d['balanceamount']]
-                                        for d in all_data_after_update]
-
-        # Clear existing data in the sheet before updating
-        sheets_service.spreadsheets().values().clear(spreadsheetId=spreadsheet_id, range='A1:J').execute()
-        # Update the sheet with the latest data
-        sheets_service.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id, range='A1', valueInputOption='RAW', body={'values': values_to_write}
-        ).execute()
-        logger.info("Data synced to Google Sheets in /update.")
-
         cur.close()
         conn.close()
-        logger.info("Data updated successfully in StockBook and synced to Google Sheets.")
+        logger.info("Data updated successfully")
         return jsonify({'message': 'Data updated'}), 200
     except Exception as e:
-        logger.error(f"Update error: {e}", exc_info=True)
-        if 'conn' in locals() and conn:
-            conn.rollback()
-            logger.warning("Database transaction rolled back in /update due to error.")
+        logger.error(f"Update error: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/export-to-sheet', methods=['POST'])
 def export_to_sheet():
-    """
-    Exports provided data to a new Google Sheet.
-    This route expects the full dataset to be sent in the request body.
-    """
     try:
-        data = request.json # Expects a list of dictionaries representing the data to export
-        logger.debug(f"Received data for export in /export-to-sheet: {json.dumps(data, indent=2)}")
-
-        # Create a new spreadsheet with a dynamic title
+        data = request.json
         spreadsheet = sheets_service.spreadsheets().create(
-            body={'properties': {'title': f'Exported_StockBook_Results_{datetime.now().strftime("%Y%m%d_%H%M%S")}'}}
+            body={'properties': {'title': f'Exported_Results_{datetime.now().strftime("%Y%m%d_%H%M%S")}'} }
         ).execute()
         spreadsheet_id = spreadsheet['spreadsheetId']
-        
-        # Define headers according to StockBook schema
-        headers = ['TransactionID', 'Date', 'Particulars', 'VoucherBillNo', 'ReceiptQuantity',
-                   'ReceiptAmount', 'IssuedQuantity', 'IssuedAmount', 'BalanceQuantity', 'BalanceAmount']
-        
-        # Prepare values for the new sheet, including headers
-        values = [headers] + [[d['TransactionID'], d['Date'], d['Particulars'], d['VoucherBillNo'],
-                               d['ReceiptQuantity'], d['ReceiptAmount'], d['IssuedQuantity'],
-                               d['IssuedAmount'], d['BalanceQuantity'], d['BalanceAmount']]
+
+        headers = ['Entry_ID', 'DATE', 'PARTICULARS', 'Voucher_BillNo', 'RECEIPTS_Quantity', 
+                   'RECEIPTS_Amount', 'ISSUED_Quantity', 'ISSUED_Amount', 'BALANCE_Quantity', 'BALANCE_Amount']
+        values = [headers] + [[d['Entry_ID'], d['DATE'], d['PARTICULARS'], d['Voucher_BillNo'],
+                               d['RECEIPTS_Quantity'], d['RECEIPTS_Amount'], d['ISSUED_Quantity'],
+                               d['ISSUED_Amount'], d['BALANCE_Quantity'], d['BALANCE_Amount']] 
                               for d in data]
-        
-        # Update the new sheet with the prepared values
         sheets_service.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id, range='A1', valueInputOption='RAW', body={'values': values}
+            spreadsheetId=spreadsheet_id,
+            range='A1',
+            valueInputOption='RAW',
+            body={'values': values}
         ).execute()
 
         shareable_link = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
-        logger.info(f"Data exported to new sheet: {shareable_link}")
+        logger.info(f"Exported to new sheet: {shareable_link}")
         return jsonify({'message': 'Sheet created', 'link': shareable_link}), 200
     except Exception as e:
-        logger.error(f"Export error: {e}", exc_info=True)
+        logger.error(f"Export error: {e}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    # Get port from environment variable, default to 5000
     port = int(os.environ.get("PORT", 5000))
-    # Run the Flask app
     app.run(host='0.0.0.0', port=port, debug=True)
