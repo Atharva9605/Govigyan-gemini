@@ -21,7 +21,8 @@ CORS(app, resources={r"/*": {"origins": ["http://localhost:3000", "https://your-
                              "allow_headers": ["Content-Type"]}})
 
 # Configure logging to write to 'app.log' file
-logging.basicConfig(level=logging.INFO, filename='app.log', format='%(asctime)s - %(levelname)s - %(message)s')
+# Setting level to DEBUG to capture more detailed logs
+logging.basicConfig(level=logging.DEBUG, filename='app.log', format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Database connection parameters from environment variables
@@ -104,7 +105,7 @@ def upload_files():
             return jsonify({'error': 'No valid files uploaded'}), 400
 
         data_entries = []
-        for file in files:
+        for file_item in files: # Renamed 'file' to 'file_item' to avoid conflict with `file` (builtin)
             # Placeholder for Gemini logic. In a real scenario, this would extract data from the file.
             gemini_result = {}  # Replace with your original Gemini logic
             entry = {
@@ -120,25 +121,42 @@ def upload_files():
             }
             data_entries.append(entry)
 
+        logger.debug(f"Data entries prepared for DB insertion in /upload: {json.dumps(data_entries, indent=2)}")
+
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor) # Use RealDictCursor for dictionary-like rows
 
         # Insert data into StockBook table
         for entry in data_entries:
-            cur.execute("""
+            sql_query = """
                 INSERT INTO StockBook (Date, Particulars, VoucherBillNo, ReceiptQuantity, ReceiptAmount,
                                      IssuedQuantity, IssuedAmount, BalanceQuantity, BalanceAmount)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING TransactionID; -- Return the auto-generated TransactionID
-            """, (
+            """
+            params = (
                 entry['Date'], entry['Particulars'], entry['VoucherBillNo'],
                 entry['ReceiptQuantity'], entry['ReceiptAmount'],
                 entry['IssuedQuantity'], entry['IssuedAmount'],
                 entry['BalanceQuantity'], entry['BalanceAmount']
-            ))
-            # Fetch the returned TransactionID and add it to the entry dictionary
-            entry['TransactionID'] = cur.fetchone()['transactionid'] # Column names returned by psycopg2 are lowercase
+            )
+            logger.debug(f"Executing SQL in /upload: {sql_query} with params: {params}")
+            
+            try:
+                cur.execute(sql_query, params)
+                # Fetch the returned TransactionID and add it to the entry dictionary
+                returned_id = cur.fetchone()
+                if returned_id:
+                    entry['TransactionID'] = returned_id['transactionid'] # Column names returned by psycopg2 are lowercase
+                    logger.debug(f"Successfully inserted row, TransactionID: {entry['TransactionID']}")
+                else:
+                    logger.warning("No TransactionID returned after INSERT. Row might not have been inserted.")
+            except psycopg2.Error as db_error:
+                logger.error(f"Database error during insert in /upload: {db_error}", exc_info=True)
+                raise # Re-raise to trigger rollback and general error handling
+            
         conn.commit() # Commit the transaction to save changes to the database
+        logger.info("Database commit successful in /upload.")
 
         # Sync data to Google Sheets
         spreadsheet_id = os.getenv('SPREADSHEET_ID', 'your_spreadsheet_id')
@@ -152,6 +170,7 @@ def upload_files():
             valueInputOption='RAW', # Interpret input data as raw values
             body={'values': values}
         ).execute()
+        logger.info("Data synced to Google Sheets in /upload.")
 
         cur.close()
         conn.close()
@@ -163,6 +182,7 @@ def upload_files():
         # Rollback in case of error
         if 'conn' in locals() and conn:
             conn.rollback()
+            logger.warning("Database transaction rolled back in /upload due to error.")
         return jsonify({'error': str(e)}), 500
 
 # Updated upload-flash route with detailed error logging and StockBook schema alignment
@@ -177,24 +197,24 @@ def upload_files_flash():
         return '', 200
     try:
         if 'files' not in request.files:
-            logger.warning("No files in request")
+            logger.warning("No files in request in /upload-flash")
             return jsonify({'error': 'No files uploaded'}), 400
         files = request.files.getlist('files')
         if not files or all(f.filename == '' for f in files):
-            logger.warning("Empty file list or no valid files")
+            logger.warning("Empty file list or no valid files in /upload-flash")
             return jsonify({'error': 'No valid files uploaded'}), 400
 
-        logger.info(f"Processing {len(files)} files with Gemini 2.0 Flash")
+        logger.info(f"Processing {len(files)} files with Gemini 2.0 Flash in /upload-flash")
         data_entries = []
-        for file in files:
+        for file_item in files:
             try:
                 # Read file content and prepare for Gemini API
-                file_content = file.read()
-                logger.debug(f"Processing file: {file.filename}, size: {len(file_content)} bytes, mimetype: {file.mimetype}")
+                file_content = file_item.read()
+                logger.debug(f"Processing file: {file_item.filename}, size: {len(file_content)} bytes, mimetype: {file_item.mimetype}")
 
                 # Call Gemini API to extract data
                 response = gemini_model.generate_content([
-                    {"mime_type": file.mimetype, "data": file_content},
+                    {"mime_type": file_item.mimetype, "data": file_content},
                     {"text": "Extract financial data: description, bill number, quantity, amount. Respond as a JSON object with keys 'description', 'bill_no', 'quantity', 'amount'."}
                 ])
                 gemini_result_text = response.text
@@ -204,7 +224,7 @@ def upload_files_flash():
                 try:
                     gemini_data = json.loads(gemini_result_text)
                 except json.JSONDecodeError:
-                    logger.error(f"Failed to parse Gemini JSON: {gemini_result_text}")
+                    logger.error(f"Failed to parse Gemini JSON: {gemini_result_text}. Setting fallback data.", exc_info=True)
                     # Fallback if Gemini doesn't return perfect JSON
                     gemini_data = {
                         'description': gemini_result_text, # Use the raw text as description
@@ -227,28 +247,44 @@ def upload_files_flash():
                 }
                 data_entries.append(entry)
             except Exception as e:
-                logger.error(f"Gemini processing failed for {file.filename}: {e}", exc_info=True)
+                logger.error(f"Gemini processing failed for {file_item.filename}: {e}", exc_info=True)
                 # Decide whether to raise or continue; here, re-raise to fail the whole request
                 raise
 
+        logger.debug(f"Data entries prepared for DB insertion in /upload-flash: {json.dumps(data_entries, indent=2)}")
         logger.info("Inserting into PostgreSQL StockBook table.")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
         for entry in data_entries:
-            cur.execute("""
+            sql_query = """
                 INSERT INTO StockBook (Date, Particulars, VoucherBillNo, ReceiptQuantity, ReceiptAmount,
                                      IssuedQuantity, IssuedAmount, BalanceQuantity, BalanceAmount)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING TransactionID;
-            """, (
+            """
+            params = (
                 entry['Date'], entry['Particulars'], entry['VoucherBillNo'],
                 entry['ReceiptQuantity'], entry['ReceiptAmount'],
                 entry['IssuedQuantity'], entry['IssuedAmount'],
                 entry['BalanceQuantity'], entry['BalanceAmount']
-            ))
-            entry['TransactionID'] = cur.fetchone()['transactionid'] # psycopg2 returns column names in lowercase
+            )
+            logger.debug(f"Executing SQL in /upload-flash: {sql_query} with params: {params}")
+
+            try:
+                cur.execute(sql_query, params)
+                returned_id = cur.fetchone()
+                if returned_id:
+                    entry['TransactionID'] = returned_id['transactionid'] # psycopg2 returns column names in lowercase
+                    logger.debug(f"Successfully inserted row, TransactionID: {entry['TransactionID']}")
+                else:
+                    logger.warning("No TransactionID returned after INSERT in /upload-flash. Row might not have been inserted.")
+            except psycopg2.Error as db_error:
+                logger.error(f"Database error during insert in /upload-flash: {db_error}", exc_info=True)
+                raise # Re-raise to trigger rollback and general error handling
+            
         conn.commit()
+        logger.info("Database commit successful in /upload-flash.")
 
         logger.info("Syncing to Google Sheets.")
         spreadsheet_id = os.getenv('SPREADSHEET_ID', 'your_spreadsheet_id')
@@ -264,6 +300,7 @@ def upload_files_flash():
             valueInputOption='RAW',
             body={'values': values}
         ).execute()
+        logger.info("Data synced to Google Sheets in /upload-flash.")
 
         cur.close()
         conn.close()
@@ -275,6 +312,7 @@ def upload_files_flash():
         logger.error(f"Upload-flash error: {e}", exc_info=True)
         if 'conn' in locals() and conn:
             conn.rollback() # Ensure rollback on error
+            logger.warning("Database transaction rolled back in /upload-flash due to error.")
         return jsonify({'error': f"Failed to process files: {str(e)}"}), 500
 
 @app.route('/results', methods=['GET'])
@@ -299,26 +337,39 @@ def update_data():
     """Updates existing data in the StockBook table and syncs to Google Sheets."""
     try:
         updates = request.json # Expects a list of dictionaries, each representing a row to update
+        logger.debug(f"Received updates for DB in /update: {json.dumps(updates, indent=2)}")
+
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
 
         for update in updates:
-            # Update query for StockBook table based on TransactionID
-            cur.execute("""
+            sql_query = """
                 UPDATE StockBook
                 SET Date = %s, Particulars = %s, VoucherBillNo = %s,
                     ReceiptQuantity = %s, ReceiptAmount = %s,
                     IssuedQuantity = %s, IssuedAmount = %s,
                     BalanceQuantity = %s, BalanceAmount = %s
                 WHERE TransactionID = %s
-            """, (
+            """
+            params = (
                 update['Date'], update['Particulars'], update['VoucherBillNo'],
                 update['ReceiptQuantity'], update['ReceiptAmount'],
                 update['IssuedQuantity'], update['IssuedAmount'],
                 update['BalanceQuantity'], update['BalanceAmount'],
                 update['TransactionID'] # Use TransactionID for WHERE clause
-            ))
+            )
+            logger.debug(f"Executing SQL in /update: {sql_query} with params: {params}")
+            
+            try:
+                cur.execute(sql_query, params)
+                if cur.rowcount == 0:
+                    logger.warning(f"No row updated for TransactionID: {update['TransactionID']}")
+            except psycopg2.Error as db_error:
+                logger.error(f"Database error during update in /update: {db_error}", exc_info=True)
+                raise # Re-raise to trigger rollback and general error handling
+
         conn.commit()
+        logger.info("Database commit successful in /update.")
 
         # Sync all data back to Google Sheets (clear and rewrite for simplicity in update)
         spreadsheet_id = os.getenv('SPREADSHEET_ID', 'your_spreadsheet_id')
@@ -326,6 +377,7 @@ def update_data():
         # Fetch all data after update for full sync to sheets
         cur.execute("SELECT * FROM StockBook ORDER BY TransactionID")
         all_data_after_update = cur.fetchall()
+        logger.debug(f"All data fetched for Google Sheet sync: {json.dumps(all_data_after_update, indent=2)}")
 
         # Prepare values for Google Sheets, ensuring headers are included for clarity
         headers = ['TransactionID', 'Date', 'Particulars', 'VoucherBillNo', 'ReceiptQuantity',
@@ -342,6 +394,7 @@ def update_data():
         sheets_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id, range='A1', valueInputOption='RAW', body={'values': values_to_write}
         ).execute()
+        logger.info("Data synced to Google Sheets in /update.")
 
         cur.close()
         conn.close()
@@ -351,6 +404,7 @@ def update_data():
         logger.error(f"Update error: {e}", exc_info=True)
         if 'conn' in locals() and conn:
             conn.rollback()
+            logger.warning("Database transaction rolled back in /update due to error.")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/export-to-sheet', methods=['POST'])
@@ -361,7 +415,8 @@ def export_to_sheet():
     """
     try:
         data = request.json # Expects a list of dictionaries representing the data to export
-        
+        logger.debug(f"Received data for export in /export-to-sheet: {json.dumps(data, indent=2)}")
+
         # Create a new spreadsheet with a dynamic title
         spreadsheet = sheets_service.spreadsheets().create(
             body={'properties': {'title': f'Exported_StockBook_Results_{datetime.now().strftime("%Y%m%d_%H%M%S")}'}}
